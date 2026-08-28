@@ -1,21 +1,25 @@
 # DualCam Mocap
 
-Low-friction dual-camera motion capture for Blender.
+Low-friction single- or dual-camera motion capture for Blender. **Single camera is the default quick-start path**; stereo is the higher-accuracy option when a calibrated second camera is available.
 
 Architecture:
 
 ```text
-camera machine (2x UVC cameras)
-  -> paired JPEG frames over WebSocket
-GPU machine (RTMPose via skellytracker)
-  -> stereo triangulation
-  -> canonical 3D skeleton over WebSocket
+camera machine
+  -> mono: one JPEG stream
+  -> stereo: synchronized JPEG pair
+GPU machine
+  -> mono: RTMW3D relative 3D pose
+  -> stereo: RTMPose 2D + calibrated triangulation
+  -> canonical skeleton over TCP
 Blender add-on
   -> live empties / armature retargeting
   -> record action
 ```
 
-## 1. GPU server
+## Quick start: one camera
+
+### GPU machine
 
 Python 3.11 is recommended.
 
@@ -24,55 +28,76 @@ cd dualcam-mocap
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-gpu.txt
+pip install onnxruntime-gpu
 cp config.example.yaml config.yaml
-```
-
-Install the CUDA-enabled tracker backend:
-
-```bash
-pip install "skellytracker[all-cuda]"
-```
-
-Put your stereo calibration at `calibration/stereo.npz`. It must contain:
-
-- `K1`, `D1`: camera A intrinsics/distortion
-- `K2`, `D2`: camera B intrinsics/distortion
-- `R`, `T`: transform from camera A to camera B
-
-Then run:
-
-```bash
 python -m gpu_server.main --config config.yaml
 ```
 
-## 2. Camera machine
+No camera calibration is required for mono mode. RTMW3D is loaded lazily when the first mono frame arrives.
+
+### Camera machine
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-camera.txt
-python -m camera_client.main --server ws://GPU_IP:8765 --cam-a 0 --cam-b 2
+python -m camera_client.main --server ws://GPU_IP:8765 --mode mono --cam-a 0
 ```
 
-The client calls `grab()` on both UVC devices before retrieving either frame. This keeps software synchronization tight without requiring hardware-trigger cameras.
+Or:
 
-## 3. Blender
+```bash
+./run_camera.sh ws://GPU_IP:8765
+```
+
+Mono mode predicts **relative** 3D pose. The GPU server locks the skeleton around the hip centre and normalizes scale from the torso, so limb motion is useful for live rig driving but global walking translation is not measured.
+
+## Stereo mode
+
+Install the CUDA-enabled SkellyTracker backend on the GPU host:
+
+```bash
+pip install "skellytracker[all-cuda]"
+```
+
+Create/copy `calibration/stereo.npz` containing:
+
+- `K1`, `D1`: camera A intrinsics/distortion
+- `K2`, `D2`: camera B intrinsics/distortion
+- `R`, `T`: transform from camera A to camera B
+
+Then start capture with:
+
+```bash
+python -m camera_client.main --server ws://GPU_IP:8765 --mode stereo --cam-a 0 --cam-b 2
+# or
+./run_camera.sh ws://GPU_IP:8765 stereo 0 2
+```
+
+The stereo client calls `grab()` on both UVC devices before retrieving either frame. The GPU server triangulates matching RTMPose keypoints and rejects points with excessive reprojection error.
+
+## Blender
 
 Install the `blender_addon/dualcam_mocap` folder as a Blender add-on (zip that folder if installing from Preferences).
 
-Open **3D View > Sidebar > Mocap** and set:
+Open **3D View > Sidebar > Mocap**, set the GPU host and keep port `8766`, then press **Connect**.
 
-```text
-ws://GPU_IP:8765
-```
-
-Press **Connect**. The initial vertical slice creates/updates `MOCAP_*` empties so you can verify the entire network + inference + triangulation chain before retargeting a production rig.
-
-For a Rigify-style armature, select it and press **Bind Selected Rig**. The add-on maps the body chain by common Rigify DEF bone names and applies live rotations. Record toggles Blender keyframe insertion on the mapped pose bones.
+The Blender protocol is identical for mono and stereo, so you can switch capture modes without changing the add-on. Debug points, `MOCAP_DRIVER`, Rigify/Mixamo-style binding and Record all consume the same skeleton JSON.
 
 ## Protocol
 
-Camera packets are MessagePack binary messages:
+Mono camera packet:
+
+```python
+{
+  "type": "frame_single",
+  "seq": 100,
+  "ts_ns": 123456789,
+  "jpeg": b"..."
+}
+```
+
+Stereo camera packet:
 
 ```python
 {
@@ -86,35 +111,33 @@ Camera packets are MessagePack binary messages:
 }
 ```
 
-Skeleton output is JSON:
+Skeleton output stays common:
 
 ```json
 {
   "type": "skeleton",
+  "capture_mode": "mono",
+  "root_translation": "locked",
   "seq": 100,
-  "ts_ns": 123456789,
   "points": {
-    "left_shoulder": {"xyz": [0.1, 1.4, 2.2], "confidence": 0.94}
+    "left_shoulder": {"xyz": [0.1, 0.2, -0.1], "confidence": 0.94}
   }
 }
 ```
 
-Coordinates are in camera-A space and converted to Blender axes by the add-on.
+Stereo output reports `root_translation: measured`; mono reports `root_translation: locked`.
 
-## Scope of this slice
+## Included now
 
-Included now:
-
-- dual UVC capture
-- paired frame transport over LAN
-- RTMPose/YOLOX inference adapter via `skellytracker`
-- 17-joint COCO body extraction
-- calibrated stereo triangulation
-- reprojection-error rejection
+- single UVC capture as default
+- RTMW3D monocular relative 3D through `rtmlib`
+- root-locked / torso-normalized mono skeleton
+- dual UVC synchronized capture
+- RTMPose/YOLOX stereo inference via `skellytracker`
+- calibrated stereo triangulation and reprojection rejection
+- newest-frame-only processing to avoid latency queues
 - light temporal EMA filtering
-- WebSocket skeleton fan-out
-- Blender debug skeleton
-- initial Rigify body retargeting
-- action keyframe recording
+- common Blender TCP skeleton protocol
+- Blender debug skeleton, driver rig, initial Rigify/Mixamo retargeting and recording
 
-Next useful additions are ChArUco calibration UI, proper rest-pose actor calibration, IK/foot locking, hands, face, and multi-camera (>2) robust triangulation.
+Next useful additions are proper actor/rest-pose calibration, foot locking, global-root estimation for mono, hands/face and batched stereo inference.
