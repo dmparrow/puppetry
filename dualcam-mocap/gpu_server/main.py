@@ -12,6 +12,7 @@ import numpy as np
 import yaml
 from websockets.asyncio.server import serve
 
+from .mono3d import RTMLibMono3DTracker
 from .tracker import SkellyRTMPoseTracker
 from .triangulation import StereoCalibration, StereoTriangulator, EmaSkeletonFilter
 
@@ -20,22 +21,60 @@ class MocapServer:
     def __init__(self, config: dict):
         server_cfg = config.get("server", {})
         tracker_cfg = config.get("tracker", {})
+        mono_cfg = config.get("mono", {})
+
         self.host = server_cfg.get("host", "0.0.0.0")
         self.port = int(server_cfg.get("port", 8765))
         self.blender_port = int(server_cfg.get("blender_port", 8766))
-        calibration = StereoCalibration.load(server_cfg.get("calibration_file", "calibration/stereo.npz"))
-        self.triangulator = StereoTriangulator(
-            calibration,
-            confidence_threshold=float(server_cfg.get("confidence_threshold", 0.35)),
-            max_reprojection_error_px=float(server_cfg.get("max_reprojection_error_px", 12.0)),
-        )
-        self.filter = EmaSkeletonFilter(float(server_cfg.get("smoothing_alpha", 0.55)))
-        self.tracker = SkellyRTMPoseTracker(
-            model=tracker_cfg.get("model", "rtmw-x-l_256x192"),
-            stage_name=tracker_cfg.get("stage_name", "body"),
-        )
+        self.confidence_threshold = float(server_cfg.get("confidence_threshold", 0.35))
+        self.smoothing_alpha = float(server_cfg.get("smoothing_alpha", 0.55))
+
+        self.tracker_model = tracker_cfg.get("model", "rtmw-x-l_256x192")
+        self.tracker_stage = tracker_cfg.get("stage_name", "body")
+        self._stereo_tracker: SkellyRTMPoseTracker | None = None
+        self._mono_tracker: RTMLibMono3DTracker | None = None
+
+        calibration_path = Path(server_cfg.get("calibration_file", "calibration/stereo.npz"))
+        self.triangulator: StereoTriangulator | None = None
+        if calibration_path.exists():
+            calibration = StereoCalibration.load(calibration_path)
+            self.triangulator = StereoTriangulator(
+                calibration,
+                confidence_threshold=self.confidence_threshold,
+                max_reprojection_error_px=float(server_cfg.get("max_reprojection_error_px", 12.0)),
+            )
+        else:
+            print(f"stereo calibration not found at {calibration_path}; mono mode is still available")
+
+        self.mono_device = str(mono_cfg.get("device", "cuda"))
+        self.mono_backend = str(mono_cfg.get("backend", "onnxruntime"))
+        self.mono_confidence = float(mono_cfg.get("confidence_threshold", 0.25))
+        self.mono_torso_length_m = float(mono_cfg.get("torso_length_m", 0.55))
+
+        self.stereo_filter = EmaSkeletonFilter(self.smoothing_alpha)
+        self.mono_filter = EmaSkeletonFilter(self.smoothing_alpha)
         self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
         self.blender_clients: set[asyncio.StreamWriter] = set()
+
+    def stereo_tracker(self) -> SkellyRTMPoseTracker:
+        if self._stereo_tracker is None:
+            print("loading stereo RTMPose tracker...")
+            self._stereo_tracker = SkellyRTMPoseTracker(
+                model=self.tracker_model,
+                stage_name=self.tracker_stage,
+            )
+        return self._stereo_tracker
+
+    def mono_tracker(self) -> RTMLibMono3DTracker:
+        if self._mono_tracker is None:
+            print(f"loading monocular RTMW3D tracker device={self.mono_device}...")
+            self._mono_tracker = RTMLibMono3DTracker(
+                device=self.mono_device,
+                backend=self.mono_backend,
+                confidence_threshold=self.mono_confidence,
+                torso_length_m=self.mono_torso_length_m,
+            )
+        return self._mono_tracker
 
     @staticmethod
     def _decode_jpeg(data: bytes):
@@ -53,13 +92,13 @@ class MocapServer:
         if hello.get("role") != "camera":
             await websocket.close(code=1008, reason="camera role required")
             return
-        print(f"camera connected: {hello.get('name', 'unknown')}")
+        print(f"camera connected: {hello.get('name', 'unknown')} mode={hello.get('mode', 'unknown')}")
         try:
             async for raw in websocket:
                 if not isinstance(raw, bytes):
                     continue
                 packet = msgpack.unpackb(raw, raw=False)
-                if packet.get("type") != "frame_pair":
+                if packet.get("type") not in {"frame_single", "frame_pair"}:
                     continue
                 if self.queue.full():
                     try:
@@ -104,6 +143,30 @@ class MocapServer:
             self.blender_clients.discard(writer)
             writer.close()
 
+    async def process_mono(self, packet: dict, seq: int) -> tuple[dict, dict]:
+        frame = self._decode_jpeg(packet["jpeg"])
+        points = await asyncio.to_thread(self.mono_tracker().process, frame)
+        points = self.mono_filter.apply(points)
+        return points, {
+            "capture_mode": "mono",
+            "root_translation": "locked",
+        }
+
+    async def process_stereo(self, packet: dict, seq: int) -> tuple[dict, dict]:
+        if self.triangulator is None:
+            raise RuntimeError(
+                "stereo frame received but no calibration is loaded; create calibration/stereo.npz or use --mode mono"
+            )
+        frame_a = self._decode_jpeg(packet["a_jpeg"])
+        frame_b = self._decode_jpeg(packet["b_jpeg"])
+        pose_a, pose_b = await asyncio.to_thread(self.stereo_tracker().process_pair, frame_a, frame_b, seq)
+        points = self.stereo_filter.apply(self.triangulator.triangulate(pose_a, pose_b))
+        return points, {
+            "capture_mode": "stereo",
+            "capture_skew_ms": abs(int(packet.get("a_ts_ns", 0)) - int(packet.get("b_ts_ns", 0))) / 1e6,
+            "root_translation": "measured",
+        }
+
     async def process_loop(self) -> None:
         processed = 0
         started = time.monotonic()
@@ -111,25 +174,29 @@ class MocapServer:
             packet = await self.queue.get()
             try:
                 seq = int(packet["seq"])
-                frame_a = self._decode_jpeg(packet["a_jpeg"])
-                frame_b = self._decode_jpeg(packet["b_jpeg"])
                 t0 = time.perf_counter()
-                pose_a, pose_b = await asyncio.to_thread(self.tracker.process_pair, frame_a, frame_b, seq)
-                points = self.filter.apply(self.triangulator.triangulate(pose_a, pose_b))
+                if packet.get("type") == "frame_single":
+                    points, metadata = await self.process_mono(packet, seq)
+                else:
+                    points, metadata = await self.process_stereo(packet, seq)
+
                 processing_ms = (time.perf_counter() - t0) * 1000.0
                 payload = {
                     "type": "skeleton",
                     "seq": seq,
                     "ts_ns": int(packet.get("ts_ns", 0)),
-                    "capture_skew_ms": abs(int(packet.get("a_ts_ns", 0)) - int(packet.get("b_ts_ns", 0))) / 1e6,
                     "processing_ms": processing_ms,
+                    **metadata,
                     "points": points,
                 }
                 await self.broadcast(payload)
                 processed += 1
                 if processed % 30 == 0:
                     elapsed = max(time.monotonic() - started, 1e-6)
-                    print(f"processed={processed} fps={processed/elapsed:.1f} points={len(points)} processing={processing_ms:.1f}ms")
+                    print(
+                        f"processed={processed} fps={processed/elapsed:.1f} "
+                        f"mode={metadata['capture_mode']} points={len(points)} processing={processing_ms:.1f}ms"
+                    )
             except Exception as exc:
                 print(f"frame processing failed: {exc}")
             finally:
@@ -146,11 +213,14 @@ class MocapServer:
                     await asyncio.Future()
         finally:
             processor.cancel()
-            self.tracker.close()
+            if self._stereo_tracker is not None:
+                self._stereo_tracker.close()
+            if self._mono_tracker is not None:
+                self._mono_tracker.close()
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Dual-camera mocap GPU server")
+    p = argparse.ArgumentParser(description="Mono/stereo mocap GPU server")
     p.add_argument("--config", default="config.yaml")
     return p.parse_args()
 
