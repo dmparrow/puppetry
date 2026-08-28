@@ -1,0 +1,7 @@
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<5
+websockets>=15,<16
+msgpack>=1.1,<2
+PyYAML>=6,<7
+# Then choose ONE SkellyTracker backend. NVIDIA CUDA 12:
+# pip install "skellytracker[all-cuda]"
