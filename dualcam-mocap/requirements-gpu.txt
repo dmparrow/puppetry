@@ -3,5 +3,8 @@ opencv-python-headless>=4.10,<5
 websockets>=15,<16
 msgpack>=1.1,<2
 PyYAML>=6,<7
-# Then choose ONE SkellyTracker backend. NVIDIA CUDA 12:
+rtmlib==0.0.16
+# NVIDIA CUDA 12 stereo tracker backend:
 # pip install "skellytracker[all-cuda]"
+# rtmlib mono mode uses ONNX Runtime; install GPU runtime on the GPU host:
+# pip install onnxruntime-gpu
