@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+config.yaml
+calibration/*.npz
+charuco_board.png
