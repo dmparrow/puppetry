@@ -34,6 +34,16 @@ def open_camera(cfg: CameraConfig) -> cv2.VideoCapture:
     return cap
 
 
+def read_single(cap: cv2.VideoCapture):
+    if not cap.grab():
+        raise RuntimeError("Camera grab failed")
+    ts_ns = time.monotonic_ns()
+    ok, frame = cap.retrieve()
+    if not ok or frame is None:
+        raise RuntimeError("Camera retrieve failed")
+    return frame, ts_ns
+
+
 def read_pair(cap_a: cv2.VideoCapture, cap_b: cv2.VideoCapture):
     if not cap_a.grab():
         raise RuntimeError("Camera A grab failed")
@@ -58,12 +68,18 @@ def encode_jpeg(frame, quality: int) -> bytes:
 
 
 async def run(args: argparse.Namespace) -> None:
+    mode = args.mode
     cap_a = open_camera(CameraConfig(args.cam_a, args.width, args.height, args.fps))
-    cap_b = open_camera(CameraConfig(args.cam_b, args.width, args.height, args.fps))
+    cap_b = None
+    if mode == "stereo":
+        cap_b = open_camera(CameraConfig(args.cam_b, args.width, args.height, args.fps))
+
     seq = 0
     sent = 0
     started = time.monotonic()
     host = socket.gethostname()
+    camera_ids = [str(args.cam_a)] if mode == "mono" else [str(args.cam_a), str(args.cam_b)]
+
     try:
         while True:
             try:
@@ -72,27 +88,42 @@ async def run(args: argparse.Namespace) -> None:
                         "type": "hello",
                         "role": "camera",
                         "name": host,
-                        "camera_ids": [str(args.cam_a), str(args.cam_b)],
+                        "mode": mode,
+                        "camera_ids": camera_ids,
                     }))
-                    print(f"Connected to {args.server}")
+                    print(f"Connected to {args.server} mode={mode}")
                     while True:
-                        frame_a, a_ts_ns, frame_b, b_ts_ns = read_pair(cap_a, cap_b)
-                        packet = {
-                            "type": "frame_pair",
-                            "seq": seq,
-                            "ts_ns": (a_ts_ns + b_ts_ns) // 2,
-                            "a_ts_ns": a_ts_ns,
-                            "b_ts_ns": b_ts_ns,
-                            "a_jpeg": encode_jpeg(frame_a, args.jpeg_quality),
-                            "b_jpeg": encode_jpeg(frame_b, args.jpeg_quality),
-                        }
+                        if mode == "mono":
+                            frame, ts_ns = read_single(cap_a)
+                            packet = {
+                                "type": "frame_single",
+                                "seq": seq,
+                                "ts_ns": ts_ns,
+                                "camera_ts_ns": ts_ns,
+                                "jpeg": encode_jpeg(frame, args.jpeg_quality),
+                            }
+                            skew_ms = None
+                        else:
+                            assert cap_b is not None
+                            frame_a, a_ts_ns, frame_b, b_ts_ns = read_pair(cap_a, cap_b)
+                            packet = {
+                                "type": "frame_pair",
+                                "seq": seq,
+                                "ts_ns": (a_ts_ns + b_ts_ns) // 2,
+                                "a_ts_ns": a_ts_ns,
+                                "b_ts_ns": b_ts_ns,
+                                "a_jpeg": encode_jpeg(frame_a, args.jpeg_quality),
+                                "b_jpeg": encode_jpeg(frame_b, args.jpeg_quality),
+                            }
+                            skew_ms = abs(a_ts_ns - b_ts_ns) / 1e6
+
                         await ws.send(msgpack.packb(packet, use_bin_type=True))
                         seq += 1
                         sent += 1
                         if sent % 60 == 0:
                             elapsed = max(time.monotonic() - started, 1e-6)
-                            skew_ms = abs(a_ts_ns - b_ts_ns) / 1e6
-                            print(f"sent={sent} fps={sent/elapsed:.1f} capture_skew={skew_ms:.2f}ms")
+                            suffix = "" if skew_ms is None else f" capture_skew={skew_ms:.2f}ms"
+                            print(f"sent={sent} fps={sent/elapsed:.1f} mode={mode}{suffix}")
             except asyncio.CancelledError:
                 raise
             except KeyboardInterrupt:
@@ -102,14 +133,16 @@ async def run(args: argparse.Namespace) -> None:
                 await asyncio.sleep(1.0)
     finally:
         cap_a.release()
-        cap_b.release()
+        if cap_b is not None:
+            cap_b.release()
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Dual camera mocap capture client")
+    p = argparse.ArgumentParser(description="Mono/stereo mocap capture client")
     p.add_argument("--server", required=True, help="ws://GPU_HOST:8765")
-    p.add_argument("--cam-a", type=int, default=0)
-    p.add_argument("--cam-b", type=int, default=2)
+    p.add_argument("--mode", choices=("mono", "stereo"), default="mono")
+    p.add_argument("--cam-a", type=int, default=0, help="camera used by mono mode and stereo camera A")
+    p.add_argument("--cam-b", type=int, default=2, help="stereo camera B")
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--fps", type=int, default=30)
