@@ -22,6 +22,8 @@ services:
       MOCAP_MONO_DEVICE: cuda
       MOCAP_MONO_BACKEND: onnxruntime
       MOCAP_SMOOTHING_ALPHA: "0.55"
+      XDG_CACHE_HOME: /models/cache
+      HF_HOME: /models/huggingface
     volumes:
       - ./calibration:/app/calibration:ro
       - mocap-models:/models
