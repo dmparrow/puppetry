@@ -1,0 +1,27 @@
+services:
+  mocap-gpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    container_name: mocap-gpu
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+      - "8766:8766"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./calibration:/app/calibration:ro
+      - mocap-model-cache:/root/.cache
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  mocap-model-cache:

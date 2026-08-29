@@ -1,0 +1,1 @@
+Current implementation status: end-to-end vertical slice committed on this feature branch. Local Python compile check passed; synthetic calibrated stereo triangulation test passed. Hardware camera/GPU/Blender smoke test remains to be run on the target machines.
