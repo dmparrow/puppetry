@@ -1,0 +1,37 @@
+services:
+  mocap-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      - inference
+    ports:
+      - "50051:50051"
+      - "8766:8766"
+
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    restart: unless-stopped
+    expose:
+      - "50052"
+    environment:
+      MOCAP_CALIBRATION: /app/calibration/stereo.npz
+      MOCAP_MONO_DEVICE: cuda
+      MOCAP_MONO_BACKEND: onnxruntime
+      MOCAP_SMOOTHING_ALPHA: "0.55"
+    volumes:
+      - ./calibration:/app/calibration:ro
+      - mocap-models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  mocap-models:
