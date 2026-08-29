@@ -6,8 +6,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
+    python3 \
+    python3-venv \
     python3-pip \
     libglib2.0-0 \
     libgl1 \
@@ -17,15 +17,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY requirements-gpu.txt /app/requirements-gpu.txt
-RUN python3.11 -m pip install --upgrade pip setuptools wheel \
-    && python3.11 -m pip install -r /app/requirements-gpu.txt \
-    && python3.11 -m pip install "skellytracker[all-cuda]" rtmlib
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+    && python3 -m pip install -r /app/requirements-gpu.txt \
+    && python3 -m pip install "skellytracker[all-cuda]" rtmlib
 
 COPY gpu_server /app/gpu_server
 COPY config.example.yaml /app/config.example.yaml
 
-RUN mkdir -p /app/calibration /models
+RUN mkdir -p /app/calibration
 
 EXPOSE 8765 8766
 
-CMD ["python3.11", "-m", "gpu_server.main", "--config", "/app/config.yaml"]
+CMD ["python3", "-m", "gpu_server.main", "--config", "/app/config.yaml"]
