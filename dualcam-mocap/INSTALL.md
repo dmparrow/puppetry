@@ -1,21 +1,35 @@
 # Install / first run
 
-## GPU machine
+## GPU machine — recommended Docker path
+
+Prerequisites on the host:
+
+- NVIDIA driver working (`nvidia-smi`)
+- Docker Engine + Docker Compose v2
+- NVIDIA Container Toolkit
+
+Then:
 
 ```bash
 cd dualcam-mocap
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-gpu.txt
-pip install onnxruntime-gpu
-cp config.example.yaml config.yaml
-python -m gpu_server.main --config config.yaml
+chmod +x run_gpu_container.sh
+./run_gpu_container.sh
 ```
 
-`rtmlib` supplies the single-camera RTMW3D solver. For stereo mode also install:
+The launcher:
+
+- verifies Docker/Compose;
+- verifies the host GPU with `nvidia-smi`;
+- verifies Docker can access the GPU;
+- creates `config.yaml` from `config.example.yaml` if needed;
+- builds and starts the mocap GPU container.
+
+Useful commands:
 
 ```bash
-pip install "skellytracker[all-cuda]"
+docker compose logs -f mocap-gpu
+docker compose restart mocap-gpu
+docker compose down
 ```
 
 Ports:
@@ -23,14 +37,30 @@ Ports:
 - `8765/tcp`: WebSocket camera input
 - `8766/tcp`: newline-delimited JSON skeleton output for Blender
 
+The model/download cache is stored in the named Docker volume `mocap-model-cache`, so rebuilding the image does not intentionally throw away downloaded model cache data.
+
+### Native GPU install (fallback)
+
+```bash
+cd dualcam-mocap
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-gpu.txt
+pip install "skellytracker[all-cuda]" rtmlib
+cp config.example.yaml config.yaml
+python -m gpu_server.main --config config.yaml
+```
+
 ## Camera machine — single camera (default)
+
+Keep the camera client native so Linux can access `/dev/video*` without Docker device passthrough setup.
 
 ```bash
 cd dualcam-mocap
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-camera.txt
-python -m camera_client.main --server ws://GPU_IP:8765 --mode mono --cam-a 0
+./run_camera.sh ws://GPU_IP:8765
 ```
 
 No calibration is needed. Mono mode provides relative 3D pose with hip-centred/root-locked motion.
@@ -45,10 +75,12 @@ python tools/generate_charuco.py
 python tools/calibrate_stereo.py --cam-a 0 --cam-b 2 --out calibration/stereo.npz
 ```
 
-Copy `calibration/stereo.npz` to the same path on the GPU machine, then run:
+Copy `calibration/stereo.npz` into `dualcam-mocap/calibration/` on the GPU host. The Compose service mounts that directory read-only into the container.
+
+Then run:
 
 ```bash
-python -m camera_client.main --server ws://GPU_IP:8765 --mode stereo --cam-a 0 --cam-b 2
+./run_camera.sh ws://GPU_IP:8765 stereo 0 2
 ```
 
 ## Blender
