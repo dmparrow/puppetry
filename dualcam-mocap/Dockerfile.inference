@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements-gpu.txt /app/requirements-gpu.txt
 RUN python3 -m pip install --upgrade pip setuptools wheel \
     && python3 -m pip install -r /app/requirements-gpu.txt \
-    && python3 -m pip install grpcio rtmlib "skellytracker[all-cuda]"
+    && python3 -m pip install onnxruntime-gpu grpcio rtmlib "skellytracker[all-cuda]"
 
 COPY gpu_server /app/gpu_server
 COPY inference/python /app/inference/python
