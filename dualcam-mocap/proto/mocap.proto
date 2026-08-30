@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package mocap.v1;
+
+option go_package = "github.com/dmparrow/puppetry/dualcam-mocap/internal/rpc";
+
+message CameraFrame {
+  uint32 camera_id = 1;
+  int64 timestamp_ns = 2;
+  bytes jpeg = 3;
+}
+
+message FrameSet {
+  uint64 sequence = 1;
+  string capture_mode = 2;
+  repeated CameraFrame frames = 3;
+}
+
+message Joint {
+  string name = 1;
+  float x = 2;
+  float y = 3;
+  float z = 4;
+  float confidence = 5;
+}
+
+message Skeleton {
+  uint64 sequence = 1;
+  int64 timestamp_ns = 2;
+  string capture_mode = 3;
+  string root_translation = 4;
+  repeated Joint joints = 5;
+  float processing_ms = 6;
+}
+
+service Mocap {
+  rpc StreamFrames(stream FrameSet) returns (stream Skeleton);
+}
+
+service Inference {
+  rpc Infer(FrameSet) returns (Skeleton);
+}

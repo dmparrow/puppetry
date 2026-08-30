@@ -4,3 +4,6 @@ __pycache__/
 config.yaml
 calibration/*.npz
 charuco_board.png
+assets/quaternius-rpg/
+mocap_four_actor_test.blend
+mocap_four_actor_test.blend1
